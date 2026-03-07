@@ -7,22 +7,22 @@ from torchaudio import functional as F
 
 class LogMelFilterBanks(nn.Module):
     def __init__(
-            self,
-            n_fft: int = 400,
-            samplerate: int = 16000,
-            hop_length: int = 160,
-            n_mels: int = 80,
-            pad_mode: str = 'reflect',
-            power: float = 2.0,
-            normalize_stft: bool = False,
-            onesided: bool = True,
-            center: bool = True,
-            return_complex: bool = True,
-            f_min_hz: float = 0.0,
-            f_max_hz: Optional[float] = None,
-            norm_mel: Optional[str] = None,
-            mel_scale: str = 'htk'
-        ):
+        self,
+        n_fft: int = 400,
+        samplerate: int = 16000,
+        hop_length: int = 160,
+        n_mels: int = 80,
+        pad_mode: str = "reflect",
+        power: float = 2.0,
+        normalize_stft: bool = False,
+        onesided: bool = True,
+        center: bool = True,
+        return_complex: bool = True,
+        f_min_hz: float = 0.0,
+        f_max_hz: Optional[float] = None,
+        norm_mel: Optional[str] = None,
+        mel_scale: str = "htk",
+    ):
         super(LogMelFilterBanks, self).__init__()
         # general params and params defined by the exercise
         self.n_fft = n_fft
@@ -82,7 +82,7 @@ class LogMelFilterBanks(nn.Module):
             window=window,
             center=self.center,
             pad_mode=self.pad_mode,
-            normalized=False, # torchaudio uses always False
+            normalized=False,  # torchaudio uses always False
             onesided=self.onesided,
             return_complex=self.return_complex,
         )
