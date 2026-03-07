@@ -14,7 +14,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 @pytest.fixture(scope="module")
 def signal():
-    wav, _ = torchaudio.load(str(DATA_DIR / "tuco-get-out.wav"))
+    wav, _ = torchaudio.load(str(DATA_DIR / "get-out.wav"))
     return wav
 
 
