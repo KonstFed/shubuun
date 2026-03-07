@@ -55,13 +55,6 @@ class LogMelFilterBanks(nn.Module):
         self.mel_fbanks = self._init_melscale_fbanks()
 
     def _init_melscale_fbanks(self):
-        # To access attributes, use self.<parameter_name>
-        # return F.melscale_fbanks(
-        #     n_freq=self.n_fft,
-        #     # Turns a normal STFT into a mel frequency STFT with triangular filter banks
-        #     # make a full and correct function call
-        #     # <YOUR CODE GOES HERE>
-        # )
         n_freqs = self.n_fft // 2 + 1 if self.onesided else self.n_fft
         return F.melscale_fbanks(
             n_freqs=n_freqs,
@@ -80,11 +73,7 @@ class LogMelFilterBanks(nn.Module):
         #     # <YOUR CODE GOES HERE>
         # )
 
-        # Move window to the same device/dtype as input
         window = self.window.to(device=x.device, dtype=x.dtype)
-
-        # STFT output shape with return_complex=True:
-        # (batch, n_freq, n_frames)
         stft = torch.stft(
             input=x,
             n_fft=self.n_fft,
@@ -113,24 +102,10 @@ class LogMelFilterBanks(nn.Module):
             Torch.Tensor: Tensor of log mel filterbanks of dimension (batch, n_mels, n_frames),
                 where n_frames is a function of the window_length, hop_length and length of audio
         """
-        # <YOUR CODE GOES HERE>
-        # Return log mel filterbanks matrix
-        # return
-
-        # Power spectrogram: (batch, n_freq, n_frames)
         spec = self.spectrogram(x)
-
-        # Mel filterbanks matrix to same device/dtype
         mel_fbanks = self.mel_fbanks.to(device=x.device, dtype=spec.dtype)
-
-        # Apply mel filterbanks over frequency axis
-        # (batch, n_frames, n_freq) @ (n_freq, n_mels) -> (batch, n_frames, n_mels)
-        mel_spec = torch.matmul(spec.transpose(1, 2), mel_fbanks)
-
-        # Back to (batch, n_mels, n_frames)
+        mel_spec = spec.transpose(1, 2) @ mel_fbanks
         mel_spec = mel_spec.transpose(1, 2)
-
-        # Log mel filterbanks
         log_mel_spec = torch.log(mel_spec + 1e-6)
 
         return log_mel_spec
