@@ -1,11 +1,11 @@
-"""Train yes/no classifier: python -m shubuun.hw1.train [--data_dir PATH]"""
-
+import json
 import argparse
 import time
 import torch
 import lightning as L
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import CSVLogger
+from sklearn.model_selection import ParameterGrid
 from thop import profile
 
 from shubuun.hw1.datamodule import YesNoDataModule
@@ -36,7 +36,7 @@ class EpochTimeAndFlopsCallback(Callback):
     def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         device = next(pl_module.parameters()).device
         dm = trainer.datamodule
-        batch = next(iter(dm.train_dataloader()))
+        batch = next(iter(dm.val_dataloader()))
         x = batch[0].to(device)
         n_params = count_parameters(pl_module)
         flops = count_flops(pl_module, x)
@@ -55,25 +55,20 @@ class EpochTimeAndFlopsCallback(Callback):
 class YesNoModel(L.LightningModule):
     """Binary classifier (yes/no). Replace self.net with your architecture."""
 
-    def __init__(self, lr: float = 1e-3):
+    def __init__(self, lr: float = 1e-3, n_mels: int = 80, groups: int = 1):
         super().__init__()
         self.lr = lr
         # Simple 1D CNN: input (B, 80, T) log-mel -> conv blocks -> global pool -> 2 logits.
         self.net = torch.nn.Sequential(
-            torch.nn.Conv1d(80, 32, kernel_size=25, padding=12),
-            torch.nn.BatchNorm1d(32),
+            torch.nn.Conv1d(n_mels, 16, kernel_size=25, padding=12, groups=groups),
             torch.nn.ReLU(),
             torch.nn.MaxPool1d(4),
-            torch.nn.Conv1d(32, 64, kernel_size=25, padding=12),
-            torch.nn.BatchNorm1d(64),
+            torch.nn.Conv1d(16, 32, kernel_size=25, padding=12, groups=groups),
             torch.nn.ReLU(),
             torch.nn.MaxPool1d(4),
-            torch.nn.Conv1d(64, 128, kernel_size=25, padding=12),
-            torch.nn.BatchNorm1d(128),
-            torch.nn.ReLU(),
             torch.nn.AdaptiveAvgPool1d(1),
             torch.nn.Flatten(),
-            torch.nn.Linear(128, 1),
+            torch.nn.Linear(32, 1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -102,27 +97,59 @@ class YesNoModel(L.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--data_dir", default="data", help="SPEECHCOMMANDS root")
-    p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--max_epochs", type=int, default=5)
-    p.add_argument("--lr", type=float, default=1e-3)
-    args = p.parse_args()
-
+def train_run(params: dict, data_dir: str, log_dir: str = "logs"):
+    """Train one run; logs (CSV, etc.) are saved under log_dir."""
     dm = YesNoDataModule(
-        args.data_dir,
-        logMelParams={},
-        batch_size=args.batch_size,
+        data_dir,
+        logMelParams={"n_mels": params["n_mels"]},
+        batch_size=params["batch_size"],
         num_workers=4,
     )
-    model = YesNoModel(lr=args.lr)
+    model = YesNoModel(lr=params["lr"], n_mels=params["n_mels"], groups=params["groups"])
     trainer = L.Trainer(
-        max_epochs=args.max_epochs,
-        logger=CSVLogger("logs"),
+        max_epochs=params["max_epochs"],
+        logger=CSVLogger(log_dir),
         callbacks=[EpochTimeAndFlopsCallback()],
     )
     trainer.fit(model, dm)
+
+
+def grid_search(data_dir: str, base_log_dir: str = "logs/gridsearch"):
+    """Train for each param combination; logs under base_log_dir/run_0, run_1, ..."""
+    param_grid = {"n_mels":[16, 32, 64, 128], "max_epochs":[10], "batch_size":[32], "lr":[1e-3], "groups":[1, 2, 4, 8, 16]}
+    total = len(ParameterGrid(param_grid))
+    for i, params in enumerate(ParameterGrid(param_grid)):
+        log_dir = f"{base_log_dir}/run_{i}"
+        print("\033[96m" + "-"* 70 + "\033[0m")
+        print(f"\033[96mRun {i}/{total}: {params} -> {log_dir}\033[0m")
+        print("\033[96m" + "-"* 70 + "\033[0m")
+        train_run(params, data_dir, log_dir=log_dir)
+        
+        params_file = f"{log_dir}/params.json"
+        with open(params_file, "w") as f:
+            json.dump(params, f)
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--data_dir", default="data", help="SPEECHCOMMANDS root")
+    p.add_argument("--log_dir", default="logs", help="Folder to save run logs (CSV, etc.)")
+    p.add_argument(
+        "--grid",
+        action="store_true",
+        help="Run grid search over lr and batch_size; use --log_dir as base folder",
+    )
+    args = p.parse_args()
+
+    if args.grid:
+        grid_search(args.data_dir)
+    else:
+        train_params = {
+            "batch_size": args.batch_size,
+            "max_epochs": args.max_epochs,
+            "lr": args.lr,
+            "n_mels": 80,
+        }
+        train_run(train_params, args.data_dir, log_dir=args.log_dir)
 
 
 if __name__ == "__main__":
