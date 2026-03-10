@@ -1,133 +1,205 @@
-"""Plot Lightning training metrics from CSV to a single PNG.
-
-Usage:
-  python -m shubuun.hw1.plot_training [--csv PATH] [--out PATH]
-
-Defaults: --csv logs/lightning_logs/version_N/metrics.csv (latest version),
-         --out logs/training_curves.png
-"""
+"""Plot gridsearch training metrics. Usage: python -m shubuun.hw1.plot_training [--grid-dir PATH] [--out-dir PATH]"""
 
 import argparse
+import json
 from pathlib import Path
 
 import pandas as pd
 import matplotlib.pyplot as plt
 
 
-def find_latest_metrics_csv(logs_dir: Path) -> Path | None:
-    """Return path to metrics.csv in the latest version_* under logs_dir."""
-    lightning_logs = logs_dir / "lightning_logs"
-    if not lightning_logs.exists():
+def _latest_metrics_csv(run_dir: Path) -> Path | None:
+    lightning = run_dir / "lightning_logs"
+    if not lightning.exists():
         return None
     versions = sorted(
-        (p for p in lightning_logs.iterdir() if p.is_dir() and p.name.startswith("version_")),
-        key=lambda p: int(p.name.split("_")[1]) if p.name.split("_")[1].isdigit() else -1,
+        (x for x in lightning.iterdir() if x.is_dir() and x.name.startswith("version_")),
+        key=lambda x: int(x.name.split("_")[1]) if x.name.split("_")[1].isdigit() else -1,
     )
     if not versions:
         return None
-    csv_path = versions[-1] / "metrics.csv"
-    return csv_path if csv_path.exists() else None
+    p = versions[-1] / "metrics.csv"
+    return p if p.exists() else None
 
 
-def plot_training_curves(csv_path: Path, out_path: Path) -> None:
-    """Load metrics.csv and plot all training params into a single PNG."""
+def _load_run(run_dir: Path) -> tuple[dict, pd.DataFrame, dict] | None:
+    params = {}
+    if (run_dir / "params.json").exists():
+        with open(run_dir / "params.json") as f:
+            params = json.load(f)
+    csv_path = _latest_metrics_csv(run_dir)
+    if not csv_path:
+        return None
     df = pd.read_csv(csv_path)
-    # Lightning leaves epoch empty when unchanged
     df["epoch"] = df["epoch"].ffill().fillna(0).astype(int)
 
-    # Scalar metrics logged once (e.g. at step 0)
     scalars = {}
     for col in ("n_params", "flops"):
-        if col in df.columns:
-            val = df[col].dropna()
-            if len(val):
-                scalars[col] = int(val.iloc[0])
+        v = df[col].dropna()
+        if len(v):
+            scalars[col] = int(v.iloc[0])
 
-    # Epoch-level metrics (one value per epoch)
-    epoch_cols = [
-        c for c in ("train_loss_epoch", "val_loss", "val_acc", "epoch_time_sec") if c in df.columns
-    ]
-    # Step-level (many per epoch)
-    step_cols = [c for c in ("train_loss_step",) if c in df.columns]
+    rows = []
+    for ep in df["epoch"].dropna().unique():
+        sub = df[df["epoch"] == ep]
+        row = {"epoch": int(ep)}
+        for c in ("train_loss_epoch", "val_acc", "val_loss", "epoch_time_sec"):
+            if c in df.columns:
+                v = sub[c].dropna()
+                if len(v):
+                    row[c] = v.iloc[-1]
+        rows.append(row)
+    epoch_df = pd.DataFrame(rows).sort_values("epoch") if rows else pd.DataFrame()
+    return params, epoch_df, scalars
 
-    n_plots = len(epoch_cols) + len(step_cols)
-    if not n_plots:
-        raise ValueError(f"No plottable metrics in {csv_path}. Columns: {list(df.columns)}")
 
-    fig, axes = plt.subplots(n_plots, 1, figsize=(8, 2.5 * n_plots), sharex=False)
-    if n_plots == 1:
-        axes = [axes]
+def _load_grid(grid_dir: Path) -> list[tuple[str, dict, pd.DataFrame, dict]]:
+    out = []
+    for p in sorted(Path(grid_dir).iterdir()):
+        if not p.is_dir() or not p.name.startswith("run_"):
+            continue
+        r = _load_run(p)
+        if r:
+            out.append((p.name, *r))
+    return out
 
-    idx = 0
 
-    # Step-level: x = step
-    for col in step_cols:
-        ax = axes[idx]
-        step = df["step"].values
-        val = df[col].values
-        mask = pd.notna(val)
-        if mask.any():
-            ax.plot(step[mask], val[mask], color="C0", alpha=0.8)
-        ax.set_ylabel(col.replace("_", " ").title())
-        ax.set_xlabel("Step")
-        ax.grid(True, alpha=0.3)
-        ax.set_title(col.replace("_", " ").title())
-        idx += 1
-
-    # Epoch-level: x = epoch
-    for col in epoch_cols:
-        ax = axes[idx]
-        sub = df[["epoch", col]].dropna(subset=[col])
-        if not sub.empty:
-            # one row per epoch (take last if duplicated)
-            by_epoch = sub.groupby("epoch", as_index=False).last()
-            ax.plot(by_epoch["epoch"], by_epoch[col], marker="o", markersize=4, color="C0")
-        ax.set_ylabel(col.replace("_", " ").title())
-        ax.set_xlabel("Epoch")
-        ax.grid(True, alpha=0.3)
-        ax.set_title(col.replace("_", " ").title())
-        idx += 1
-
-    # Add scalar summary as text
-    if scalars:
-        text = "  |  ".join(f"{k}: {v:,}" for k, v in scalars.items())
-        fig.suptitle(f"Training curves  ({text})", fontsize=10, y=1.02)
-
-    plt.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved: {out_path}")
+def _save(fig, out_dir: Path, name: str) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / name
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {path}")
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Plot Lightning training metrics to a single PNG.")
-    p.add_argument(
-        "--csv",
-        type=Path,
-        default=None,
-        help="Path to metrics.csv (default: latest version in logs/lightning_logs)",
-    )
-    p.add_argument(
-        "--out",
-        type=Path,
-        default=Path("logs/training_curves.png"),
-        help="Output PNG path (default: logs/training_curves.png)",
-    )
+    p = argparse.ArgumentParser()
+    p.add_argument("--grid-dir", type=Path, default=Path("logs/gridsearch"))
+    p.add_argument("--out-dir", type=Path, default=Path("logs/gridsearch/plots"))
     args = p.parse_args()
 
-    csv_path = args.csv
-    if csv_path is None:
-        logs_dir = Path("logs")
-        csv_path = find_latest_metrics_csv(logs_dir)
-        if csv_path is None:
-            raise SystemExit("No metrics.csv found. Run training first or pass --csv PATH.")
-    else:
-        csv_path = csv_path.resolve()
-        if not csv_path.exists():
-            raise SystemExit(f"File not found: {csv_path}")
+    runs = _load_grid(args.grid_dir.resolve())
+    if not runs:
+        raise SystemExit(f"No runs in {args.grid_dir}")
 
-    plot_training_curves(csv_path, args.out.resolve())
+    out = Path(args.out_dir)
+    summary_rows = []
+    for run_id, params, epoch_df, scalars in runs:
+        summary_rows.append({
+            "run_id": run_id,
+            "groups": params.get("groups"),
+            "n_mels": params.get("n_mels"),
+            "n_params": scalars.get("n_params"),
+            "flops": scalars.get("flops"),
+            "mean_epoch_time_sec": epoch_df["epoch_time_sec"].mean() if "epoch_time_sec" in epoch_df.columns and len(epoch_df) else None,
+            "final_val_acc": epoch_df["val_acc"].iloc[-1] if "val_acc" in epoch_df.columns and len(epoch_df) else None,
+        })
+    summary = pd.DataFrame(summary_rows)
+
+    def label(run_id: str, params: dict) -> str:
+        return f"{run_id} (g={params.get('groups')}, m={params.get('n_mels')})"
+
+    # Train loss over all runs
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for run_id, params, epoch_df, _ in runs:
+        if "train_loss_epoch" in epoch_df.columns and len(epoch_df):
+            ax.plot(epoch_df["epoch"], epoch_df["train_loss_epoch"], marker="o", markersize=3, label=label(run_id, params), alpha=0.8)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Train loss")
+    ax.set_title("Train loss (all runs)")
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=7)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    _save(fig, out, "train_loss_comparison.png")
+
+    # Val acc over all runs
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for run_id, params, epoch_df, _ in runs:
+        if "val_acc" in epoch_df.columns and len(epoch_df):
+            ax.plot(epoch_df["epoch"], epoch_df["val_acc"], marker="o", markersize=3, label=label(run_id, params), alpha=0.8)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Val accuracy")
+    ax.set_title("Val accuracy (all runs)")
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=7)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    _save(fig, out, "val_acc_comparison.png")
+
+    # n_mels vs final val_acc
+    v = summary.dropna(subset=["n_mels", "final_val_acc"])
+    if len(v):
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for g in v["groups"].dropna().unique():
+            s = v[v["groups"] == g].sort_values("n_mels")
+            ax.plot(s["n_mels"], s["final_val_acc"], marker="o", label=f"groups={g}")
+        ax.set_xlabel("n_mels")
+        ax.set_ylabel("Final val accuracy")
+        ax.set_title("n_mels vs accuracy")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        _save(fig, out, "n_mels_vs_accuracy.png")
+
+    # Epoch time vs groups
+    v = summary.dropna(subset=["groups", "mean_epoch_time_sec"])
+    if len(v):
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for m in v["n_mels"].dropna().unique():
+            s = v[v["n_mels"] == m].sort_values("groups")
+            ax.plot(s["groups"], s["mean_epoch_time_sec"], marker="o", label=f"n_mels={m}")
+        ax.set_xlabel("groups")
+        ax.set_ylabel("Mean epoch time (sec)")
+        ax.set_title("Epoch time vs groups")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        _save(fig, out, "epoch_time_vs_groups.png")
+
+    # n_params vs groups and n_mels
+    v = summary.dropna(subset=["n_params"])
+    if len(v):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        for m in v["n_mels"].dropna().unique():
+            s = v[v["n_mels"] == m].sort_values("groups")
+            ax1.plot(s["groups"], s["n_params"], marker="o", label=f"n_mels={m}")
+        ax1.set_xlabel("groups")
+        ax1.set_ylabel("Parameters")
+        ax1.set_title("Parameters vs groups")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        for g in v["groups"].dropna().unique():
+            s = v[v["groups"] == g].sort_values("n_mels")
+            ax2.plot(s["n_mels"], s["n_params"], marker="o", label=f"groups={g}")
+        ax2.set_xlabel("n_mels")
+        ax2.set_ylabel("Parameters")
+        ax2.set_title("Parameters vs n_mels")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        plt.tight_layout()
+        _save(fig, out, "n_params_vs_groups_and_mels.png")
+
+    # FLOPs vs groups and n_mels
+    v = summary.dropna(subset=["flops"])
+    if len(v):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        for m in v["n_mels"].dropna().unique():
+            s = v[v["n_mels"] == m].sort_values("groups")
+            ax1.plot(s["groups"], s["flops"], marker="o", label=f"n_mels={m}")
+        ax1.set_xlabel("groups")
+        ax1.set_ylabel("FLOPs")
+        ax1.set_title("FLOPs vs groups")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        for g in v["groups"].dropna().unique():
+            s = v[v["groups"] == g].sort_values("n_mels")
+            ax2.plot(s["n_mels"], s["flops"], marker="o", label=f"groups={g}")
+        ax2.set_xlabel("n_mels")
+        ax2.set_ylabel("FLOPs")
+        ax2.set_title("FLOPs vs n_mels")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        plt.tight_layout()
+        _save(fig, out, "flops_vs_groups_and_mels.png")
 
 
 if __name__ == "__main__":
